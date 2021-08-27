@@ -11,10 +11,12 @@ from util.box_ops import box_cxcywh_to_xyxy, generalized_box_iou
 
 class HungarianMatcher(nn.Module):
     """This class computes an assignment between the targets and the predictions of the network
-
+    最终匹配方案是选取“loss总和”最小的分配方式
     For efficiency reasons, the targets don't include the no_object. Because of this, in general,
     there are more predictions than targets. In this case, we do a 1-to-1 matching of the best predictions,
     while the others are un-matched (and thus treated as non-objects).
+    #通常预测集中的物体数量（默认为100）会比图像中实际存在的目标数量多，
+    匈牙利算法按1对1的方式进行匹配，没有被匹配到的预测物体就自动被归类为背景（non-objects）。
     """
 
     def __init__(self, cost_class: float = 1, cost_bbox: float = 1, cost_giou: float = 1):
@@ -26,7 +28,7 @@ class HungarianMatcher(nn.Module):
             cost_giou: This is the relative weight of the giou loss of the bounding box in the matching cost
         """
         super().__init__()
-        self.cost_class = cost_class
+        self.cost_class = cost_class #各类型的相对权重
         self.cost_bbox = cost_bbox
         self.cost_giou = cost_giou
         assert cost_class != 0 or cost_bbox != 0 or cost_giou != 0, "all costs cant be 0"
@@ -59,7 +61,9 @@ class HungarianMatcher(nn.Module):
         out_bbox = outputs["pred_boxes"].flatten(0, 1)  # [batch_size * num_queries, 4]
 
         # Also concat the target labels and boxes
+        # (num_targets1 + num_targets2+...)
         tgt_ids = torch.cat([v["labels"] for v in targets])
+        # (num_targets1 + num_targets2+..., 4)
         tgt_bbox = torch.cat([v["boxes"] for v in targets])
 
         # Compute the classification cost. Contrary to the loss, we don't use the NLL,
@@ -68,9 +72,15 @@ class HungarianMatcher(nn.Module):
         cost_class = -out_prob[:, tgt_ids]
 
         # Compute the L1 cost between boxes
-        cost_bbox = torch.cdist(out_bbox, tgt_bbox, p=1)
+        # out_bbox中的每个4元组都与tgt_bbox中的计算l1 loss(p=1)
+        # |x-x^hat| + |y-y^hat| + |w-w^hat| + |h-h^hat|
+        # (batch_size * num_queries, num_targets1+num_targets2+..)
+        cost_bbox = torch.cdist(out_bbox, tgt_bbox, p=1) #L1范数
+        # 这个方法会对每对预测框与GT都进行误差计算：比如预测框有N个，GT有M个，结果就会有NxM个值。
+        #　接着对各部分度量加权求和，得到一个总度量。然后，统计当前batch中每张图像的GT数量
 
         # Compute the giou cost betwen boxes
+        # (batch_size * num_queries, num_targets1+num_targets2+..)
         cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(out_bbox), box_cxcywh_to_xyxy(tgt_bbox))
 
         # Final cost matrix
@@ -79,6 +89,7 @@ class HungarianMatcher(nn.Module):
 
         sizes = [len(v["boxes"]) for v in targets]
         indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
+        # C.split() 在最后一维按各张图像的目标数量进行分割，这样就可以在各图像中将预测结果与GT进行匹配了
         return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices]
 
 

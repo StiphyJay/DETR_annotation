@@ -266,6 +266,10 @@ def get_sha():
 
 
 def collate_fn(batch):
+    #它的作用是将一个batch的数据重新组装为自定义的形式，输入参数batch就是原始的一个batch数据，
+    # 通常在Pytorch中的Dataloader中，会将一个batch的数据组装为((data1, label1), (data2, label2), ...)这样的形式，
+    # 于是第一行代码的作用就是将其变为[(data1, data2, data3, ...), (label1, label2, label3, ...)]这样的形式，
+    # 然后取出batch[0]即一个batch的图像输入到 nested_tensor_from_tensor_list() 方法中进行处理，最后将返回结果替代原始的这一个batch图像数据。
     batch = list(zip(*batch))
     batch[0] = nested_tensor_from_tensor_list(batch[0])
     return tuple(batch)
@@ -304,8 +308,12 @@ class NestedTensor(object):
 
 
 def nested_tensor_from_tensor_list(tensor_list: List[Tensor]):
+    # 为了能够统一batch中所有图像的尺寸，以便形成一个batch，我们需要得到其中的最大尺度（在所有维度上），
+    # 然后对尺度较小的图像进行填充（padding），同时设置mask以指示哪些部分是padding得来的，
+    # 以便后续模型能够在有效区域内去学习目标，相当于加入了一部分先验知识。
     # TODO make this more general
     if tensor_list[0].ndim == 3:
+        #得到一个batch中所有图像张量中每个维度的最大尺寸
         if torchvision._is_tracing():
             # nested_tensor_from_tensor_list() does not export well to ONNX
             # call _onnx_nested_tensor_from_tensor_list() instead
@@ -319,9 +327,11 @@ def nested_tensor_from_tensor_list(tensor_list: List[Tensor]):
         dtype = tensor_list[0].dtype
         device = tensor_list[0].device
         tensor = torch.zeros(batch_shape, dtype=dtype, device=device)
+        #　指示图像中哪些位置是padding的部分
         mask = torch.ones((b, h, w), dtype=torch.bool, device=device)
         for img, pad_img, m in zip(tensor_list, tensor, mask):
             pad_img[: img.shape[0], : img.shape[1], : img.shape[2]].copy_(img)
+            #原始图像有效的部分位置设置为False,其余被padding的部分设置为True.即代表这部分是padding的部分
             m[: img.shape[1], :img.shape[2]] = False
     else:
         raise ValueError('not supported')
@@ -430,6 +440,7 @@ def init_distributed_mode(args):
 
 @torch.no_grad()
 def accuracy(output, target, topk=(1,)):
+    #class_error 计算的是Top-1精度（百分数），即预测概率最大的那个类别与对应被分配的GT类别是否一致，这部分仅用于log，并不参与模型训练。
     """Computes the precision@k for the specified values of k"""
     if target.numel() == 0:
         return [torch.zeros([], device=output.device)]

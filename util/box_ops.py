@@ -48,6 +48,9 @@ def generalized_box_iou(boxes1, boxes2):
     """
     # degenerate boxes gives inf / nan results
     # so do an early check
+    # boxes1:(N,4); boxes2:(M,4)
+    #boxes1加一维代表N中的每个斗鱼boxes2中的M个做计算
+    #因此lt,rb的shape是(N,M,2)
     assert (boxes1[:, 2:] >= boxes1[:, :2]).all()
     assert (boxes2[:, 2:] >= boxes2[:, :2]).all()
     iou, union = box_iou(boxes1, boxes2)

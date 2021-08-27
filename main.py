@@ -103,6 +103,7 @@ def get_args_parser():
 
 
 def main(args):
+    #初始化分布式训练模式(根据环境变量决定是否使用分布式模式)
     utils.init_distributed_mode(args)
     print("git:\n  {}\n".format(utils.get_sha()))
 
@@ -113,21 +114,23 @@ def main(args):
     device = torch.device(args.device)
 
     # fix the seed for reproducibility
+    #　固定随机种子以便复现，get_rank()是分布式节点的编号
     seed = args.seed + utils.get_rank()
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
-
+    #构建模型，loss函数，以及后处理方法
     model, criterion, postprocessors = build_model(args)
-    model.to(device)
-
+    model.to(device)#放到gpu上跑
+    #ddp是DistributedDataParallel的缩写
     model_without_ddp = model
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
         model_without_ddp = model.module
+    #统计并输出可训练的参数数量
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
-
+    #bacobone部分与其他部分的参数分开，应用不同的初始学习率
     param_dicts = [
         {"params": [p for n, p in model_without_ddp.named_parameters() if "backbone" not in n and p.requires_grad]},
         {
@@ -151,7 +154,7 @@ def main(args):
 
     batch_sampler_train = torch.utils.data.BatchSampler(
         sampler_train, args.batch_size, drop_last=True)
-
+    #使用collate_fn来重新组装一个batch的数据
     data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
                                    collate_fn=utils.collate_fn, num_workers=args.num_workers)
     data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
@@ -165,10 +168,13 @@ def main(args):
         base_ds = get_coco_api_from_dataset(dataset_val)
 
     if args.frozen_weights is not None:
+        #　frozen_weights代表是否固定住参数的权重，类似于迁移学习的微调．
+        # 如果是，那么需要同时指定masks参数，代表这种条件仅适用于分割任务。
         checkpoint = torch.load(args.frozen_weights, map_location='cpu')
         model_without_ddp.detr.load_state_dict(checkpoint['model'])
 
     output_dir = Path(args.output_dir)
+    #若是从之前某个训练过程中恢复，则恢复当时训练所得的参数权重，学习率以及周期．
     if args.resume:
         if args.resume.startswith('https'):
             checkpoint = torch.hub.load_state_dict_from_url(
@@ -180,7 +186,7 @@ def main(args):
             optimizer.load_state_dict(checkpoint['optimizer'])
             lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
             args.start_epoch = checkpoint['epoch'] + 1
-
+    #该参数设置了仅进行测试而不进行训练
     if args.eval:
         test_stats, coco_evaluator = evaluate(model, criterion, postprocessors,
                                               data_loader_val, base_ds, device, args.output_dir)
@@ -193,10 +199,12 @@ def main(args):
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             sampler_train.set_epoch(epoch)
+        #获取一个周期的训练结果
         train_stats = train_one_epoch(
             model, criterion, data_loader_train, optimizer, device, epoch,
             args.clip_max_norm)
         lr_scheduler.step()
+        #训练结果和相关参数进行记录
         if args.output_dir:
             checkpoint_paths = [output_dir / 'checkpoint.pth']
             # extra checkpoint before LR drop and every 100 epochs
@@ -210,7 +218,7 @@ def main(args):
                     'epoch': epoch,
                     'args': args,
                 }, checkpoint_path)
-
+        #每训练一个周期后在验证集上进行评估验证
         test_stats, coco_evaluator = evaluate(
             model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
         )
@@ -221,6 +229,7 @@ def main(args):
                      'n_parameters': n_parameters}
 
         if args.output_dir and utils.is_main_process():
+            #将训练与验证结果写入到(分布式)主节点中的文件
             with (output_dir / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
@@ -232,11 +241,13 @@ def main(args):
                     if epoch % 50 == 0:
                         filenames.append(f'{epoch:03}.pth')
                     for name in filenames:
+                        #记录评估验证的结果
                         torch.save(coco_evaluator.coco_eval["bbox"].eval,
                                    output_dir / "eval" / name)
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
+    #计算训练的总共耗时并且打印
     print('Training time {}'.format(total_time_str))
 
 

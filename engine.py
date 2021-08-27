@@ -17,14 +17,21 @@ from datasets.panoptic_eval import PanopticEvaluator
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, max_norm: float = 0):
-    model.train()
-    criterion.train()
+    model.train() #模型设置为训练模式，可以进行梯度反向传播，更新权重参数
+    criterion.train() #将criterion 对象也设为train模式，它是 SetCriterion 类的一个对象实例，代表loss函数
+    # MetricLogger利用一个dict来记录训练过程中各项数据(这些数据为SmoothedValue类型)的历史值
+    # 可以求出这些数据的均值＼中位数等　并且格式化输出
+    # SmoothedValue类型通过指定的窗口大小(window_size)来存储数据的历史步长
+    # (比如1就代表不存储历史记录，每次新的值都会覆盖旧的)，并且可以格式化输出。
+    # 另外 SmoothValue 还实现了统计中位数、均值等方法，并且能够在各进程间同步数据
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     metric_logger.add_meter('class_error', utils.SmoothedValue(window_size=1, fmt='{value:.2f}'))
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 10
-
+    #log_every方法是一个生成器，用于将每个batch的数据取出（yeild），
+    # 然后该方法内部会暂停在此处，待模型训练完一次迭代后再执行剩下的内容，进行各项统计，
+    # 然后再yeild下一个batch的数据，暂停在那里，以此重复，直至所有batch都训练完。
     for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
         samples = samples.to(device)
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
@@ -35,6 +42,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         losses = sum(loss_dict[k] * weight_dict[k] for k in loss_dict.keys() if k in weight_dict)
 
         # reduce losses over all GPUs for logging purposes
+        #　将loss在各个进程间同步，默认是总和/进程数量
         loss_dict_reduced = utils.reduce_dict(loss_dict)
         loss_dict_reduced_unscaled = {f'{k}_unscaled': v
                                       for k, v in loss_dict_reduced.items()}
@@ -43,7 +51,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         losses_reduced_scaled = sum(loss_dict_reduced_scaled.values())
 
         loss_value = losses_reduced_scaled.item()
-
+        #如果loss溢出(此时产生梯度爆炸),则训练结束
         if not math.isfinite(loss_value):
             print("Loss is {}, stopping training".format(loss_value))
             print(loss_dict_reduced)
@@ -51,6 +59,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
         optimizer.zero_grad()
         losses.backward()
+        #为了避免梯度爆炸，直接度梯度进行裁剪，通过采用默认的第二范式来对梯度做截断
+        # (所有参数的梯度平方和开方后与下一个指定的最大值相比，若比其大，则按比例对所有参数的梯度进行缩放)．
         if max_norm > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
         optimizer.step()
@@ -59,8 +69,11 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         metric_logger.update(class_error=loss_dict_reduced['class_error'])
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
     # gather the stats from all processes
+    #将 MetricLogger 统计的各项数据在进程间进行同步，同时返回它们的历史均值
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
+    #global_avg是SmoothedValue类里的属性方法(用@property修饰)，返回的是在各个进程同步后的历史均值．
+    #比方说loss这项数据，在训练过程中被计算了n次，那么历史均值就是这n次的总和在进程间同步后除以n
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 
